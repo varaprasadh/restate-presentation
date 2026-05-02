@@ -1,0 +1,59 @@
+services:
+  # ── Restate Server ──────────────────────────────────────────
+  restate-server:
+    image: docker.restate.dev/restatedev/restate:latest
+    container_name: restate-demo-server
+    ports:
+      - "8080:8080"   # Ingress (send requests here)
+      - "9070:9070"   # Admin API
+      - "9071:9071"   # Metrics
+    environment:
+      - RESTATE_OBSERVABILITY__LOG__FORMAT=text
+
+  # ── Order Service ───────────────────────────────────────────
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    container_name: restate-demo-order-svc
+    ports:
+      - "9080:9080"
+    depends_on:
+      - restate-server
+
+  # ── Auto-register the service with Restate ──────────────────
+  register:
+    image: curlimages/curl:latest
+    container_name: restate-demo-register
+    depends_on:
+      - restate-server
+      - order-service
+    restart: "no"
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        echo "⏳ Waiting for Restate server..."
+        until curl -sf http://restate-server:9070/health; do sleep 2; done
+        echo "✅ Restate server is up"
+
+        echo "⏳ Waiting for Order service to start (5s)..."
+        sleep 5
+
+        echo "📝 Registering Order service with Restate..."
+        for i in 1 2 3 4 5; do
+          RESULT=$$(curl -s -o /dev/null -w "%{http_code}" -X POST http://restate-server:9070/deployments \
+            -H 'Content-Type: application/json' \
+            -d '{"uri": "http://order-service:9080"}')
+          if [ "$$RESULT" = "201" ] || [ "$$RESULT" = "200" ] || [ "$$RESULT" = "409" ]; then
+            echo "✅ Registration successful!"
+            echo ""
+            echo "🎉 Send orders with:"
+            echo "  curl localhost:8080/OrderProcessor/process --json '{\"orderId\": \"order-123\", \"item\": \"Laptop\", \"amount\": 999.99}'"
+            exit 0
+          fi
+          echo "  Retry $$i... (got HTTP $$RESULT)"
+          sleep 3
+        done
+        echo "❌ Registration failed after 5 retries"
+        exit 1
